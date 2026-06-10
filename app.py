@@ -1,66 +1,77 @@
 import streamlit as st
 from dotenv import load_dotenv
+import tempfile
+import os
 
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_mistralai import ChatMistralAI
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ---------------- LOAD ENV ----------------
 load_dotenv()
 
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(
-    page_title="Mistral RAG Chatbot",
+    page_title="📚 Mistral RAG Chatbot",
     page_icon="🤖",
-    layout="centered"
+    layout="wide"
 )
 
-# ---------------- TITLE ----------------
+# ---------------- HEADER ----------------
 st.markdown(
     """
     <h1 style='text-align: center; color: #4CAF50;'>
-        🤖 Mistral RAG Chatbot
+        🤖📚 Mistral RAG Chatbot 📚🤖
     </h1>
+
     <h4 style='text-align: center;'>
-        📚 Ask Questions From Your Documents
+        Upload your PDF and ask questions ✨
     </h4>
     """,
     unsafe_allow_html=True
 )
 
-# ---------------- LOAD EMBEDDING MODEL ----------------
+st.divider()
+
+# ---------------- SIDEBAR ----------------
+with st.sidebar:
+
+    st.header("📂 Upload PDF")
+
+    uploaded_file = st.file_uploader(
+        "Choose PDF File",
+        type=["pdf"]
+    )
+
+    st.markdown("---")
+
+    st.markdown("### 🌟 Features")
+
+    st.markdown("""
+    ✅ Upload PDF Books  
+    ✅ Fast Mistral Small Model  
+    ✅ Chroma Vector Database  
+    ✅ Ask Questions  
+    ✅ AI Powered Answers  
+    """)
+
+# ---------------- CACHE EMBEDDING MODEL ----------------
 @st.cache_resource
 def load_embedding_model():
+
     return HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
 
 embedding_model = load_embedding_model()
 
-# ---------------- LOAD VECTORSTORE ----------------
-@st.cache_resource
-def load_vectorstore():
-    return Chroma(
-        persist_directory="chroma_db",
-        embedding_function=embedding_model
-    )
-
-vectorstore = load_vectorstore()
-
-# ---------------- RETRIEVER ----------------
-retriever = vectorstore.as_retriever(
-    search_type = "mmr",
-    search_kwargs = {
-        "k" : 4,
-        "fetch_k":10,
-        "lambda_mult" :0.5
-    }
-)
-
-# ---------------- LOAD LLM ----------------
+# ---------------- CACHE LLM ----------------
 @st.cache_resource
 def load_llm():
+
     return ChatMistralAI(
         model="mistral-small-2506",
         temperature=0.7
@@ -82,6 +93,7 @@ say:
 "I could not find the answer in the document."
 """
         ),
+
         (
             "human",
             """Context:
@@ -98,76 +110,155 @@ Question:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# ---------------- DISPLAY CHAT ----------------
-for role, content in st.session_state.messages:
+if "retriever" not in st.session_state:
+    st.session_state.retriever = None
 
-    with st.chat_message(role):
-        st.write(content)
+# ---------------- FILE PROCESSING ----------------
+if uploaded_file is not None:
 
-# ---------------- USER INPUT ----------------
-query = st.chat_input("Ask a question...")
+    file_name = uploaded_file.name
 
-if query:
+    db_path = f"chroma_db/{file_name}"
 
-    # Exit Option
-    if query == "0":
-        st.session_state.messages = []
-        st.success("✅ Chat Ended")
-        st.stop()
+    # ---------------- CHECK EXISTING DATABASE ----------------
+    if os.path.exists(db_path):
 
-    # Store User Message
-    st.session_state.messages.append(("user", query))
+        st.success(
+            f"✅ '{file_name}' already exists in database.\n\n"
+            f"You can directly ask questions without re-uploading."
+        )
 
-    with st.chat_message("user"):
-        st.write(query)
-
-    # ---------------- SIMPLE CHAT HANDLING ----------------
-    greetings = [
-        "hi",
-        "hello",
-        "hey",
-        "hii",
-        "good morning",
-        "good evening"
-    ]
-
-    if query.lower() in greetings:
-
-        response_text = (
-            "Hello 👋\n\n"
-            "How can I help you with your document?"
+        vectorstore = Chroma(
+            persist_directory=db_path,
+            embedding_function=embedding_model
         )
 
     else:
 
-        # ---------------- RETRIEVE DOCUMENTS ----------------
-        with st.spinner("🔍 Searching Document..."):
+        with st.spinner("📖 Processing PDF..."):
 
-            docs = retriever.invoke(query)
+            with tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=".pdf"
+            ) as tmp_file:
 
-            context = "\n\n".join(
-                [doc.page_content for doc in docs]
+                tmp_file.write(uploaded_file.getvalue())
+
+                pdf_path = tmp_file.name
+
+            loader = PyPDFLoader(pdf_path)
+
+            documents = loader.load()
+
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000,
+                chunk_overlap=200
             )
 
-            final_prompt = prompt.invoke(
-                {
-                    "context": context,
-                    "question": query
-                }
+            chunks = splitter.split_documents(documents)
+
+            vectorstore = Chroma.from_documents(
+                documents=chunks,
+                embedding=embedding_model,
+                persist_directory=db_path
             )
 
-        # ---------------- LLM RESPONSE ----------------
-        with st.spinner("🤖 Generating Answer..."):
+        st.success("✅ PDF Uploaded & Stored Successfully")
 
-            response = llm.invoke(final_prompt)
-
-            response_text = response.content
-
-    # ---------------- STORE RESPONSE ----------------
-    st.session_state.messages.append(
-        ("assistant", response_text)
+    # ---------------- RETRIEVER ----------------
+    retriever = vectorstore.as_retriever(
+        search_type="similarity",
+        search_kwargs={
+            "k": 2
+        }
     )
 
-    # ---------------- DISPLAY RESPONSE ----------------
-    with st.chat_message("assistant"):
-        st.write(response_text)
+    st.session_state.retriever = retriever
+
+# ---------------- CHAT SECTION ----------------
+if st.session_state.retriever is not None:
+
+    st.markdown("## 💬 Chat With Your PDF")
+
+    # ---------------- DISPLAY CHAT ----------------
+    for role, content in st.session_state.messages:
+
+        with st.chat_message(role):
+            st.write(content)
+
+    # ---------------- CHAT INPUT ----------------
+    query = st.chat_input(
+        "Ask something from your PDF... 📚"
+    )
+
+    if query:
+
+        # ---------------- EXIT OPTION ----------------
+        if query == "0":
+
+            st.session_state.messages = []
+
+            st.success("✅ Chat Ended")
+
+            st.stop()
+
+        # ---------------- USER MESSAGE ----------------
+        st.session_state.messages.append(
+            ("user", query)
+        )
+
+        with st.chat_message("user"):
+            st.write(query)
+
+        # ---------------- SIMPLE GREETINGS ----------------
+        greetings = [
+            "hi",
+            "hello",
+            "hey",
+            "hii"
+        ]
+
+        if query.lower() in greetings:
+
+            response_text = (
+                "Hello 👋\n\n"
+                "Ask me anything from your PDF 📚"
+            )
+
+        else:
+
+            with st.spinner("🔍 Searching Document..."):
+
+                docs = st.session_state.retriever.invoke(query)
+
+                context = "\n\n".join(
+                    [doc.page_content for doc in docs]
+                )
+
+                final_prompt = prompt.invoke(
+                    {
+                        "context": context,
+                        "question": query
+                    }
+                )
+
+            with st.spinner("🤖 Generating Answer..."):
+
+                response = llm.invoke(final_prompt)
+
+                response_text = response.content
+
+        # ---------------- STORE RESPONSE ----------------
+        st.session_state.messages.append(
+            ("assistant", response_text)
+        )
+
+        # ---------------- DISPLAY RESPONSE ----------------
+        with st.chat_message("assistant"):
+            st.write("🤖 " + response_text)
+
+else:
+
+    st.info(
+        "📚 Upload a PDF file to start chatting."
+    )
