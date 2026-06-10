@@ -20,4 +20,4 @@ beautifulsoup4
 lxml  
 fastapi 
 uvicorn 
- 
+langchain-huggingface
